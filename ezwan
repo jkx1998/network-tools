@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+import argparse
+import subprocess
+import sys
+import os
+
+def run_cmd(cmd):
+    """执行 Shell 命令并返回结果"""
+    try:
+        result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return True, result.stdout
+    except subprocess.CalledProcessError as e:
+        return False, e.stderr
+
+def check_root():
+    """检查是否为 root 权限（tc 命令需要 root）"""
+    if os.geteuid() != 0:
+        print("错误: 此工具需要 root 权限，请使用 sudo 运行。")
+        sys.exit(1)
+
+def reset_interface(iface):
+    """清除网卡上的所有 tc 规则"""
+    print(f"[*] 正在清除 {iface} 上的规则...")
+    cmd = f"tc qdisc del dev {iface} root"
+    success, output = run_cmd(cmd)
+    # 如果本来就没有规则，tc 会报错，这里忽略该错误
+    print(f"[+] {iface} 规则已重置。")
+
+def show_status(iface):
+    """显示网卡当前的 tc 规则"""
+    cmd = f"tc qdisc show dev {iface}"
+    success, output = run_cmd(cmd)
+    print(f"--- {iface} 当前状态 ---")
+    if "netem" in output:
+        print(output.strip())
+    else:
+        print("无限制 (直通状态)")
+    print("-" * 30)
+
+def apply_netem(iface, delay, jitter, loss):
+    """应用网络模拟规则"""
+    # 先清理旧规则
+    reset_interface(iface)
+    
+    # 构建 netem 命令
+    tc_cmd = f"tc qdisc add dev {iface} root netem"
+    
+    if delay > 0:
+        tc_cmd += f" delay {delay}ms"
+        if jitter > 0:
+            tc_cmd += f" {jitter}ms 25%" # 25%是相关性，使抖动更真实
+            
+    if loss > 0:
+        tc_cmd += f" loss {loss}%"
+
+    if tc_cmd == f"tc qdisc add dev {iface} root netem":
+        print("[!] 没有指定任何延迟或丢包参数，仅重置了网络。")
+        return
+
+    print(f"[*] 应用规则: {tc_cmd}")
+    success, output = run_cmd(tc_cmd)
+    if success:
+        print(f"[+] 成功应用规则到 {iface}!")
+    else:
+        print(f"[-] 失败: {output}")
+
+def main():
+    check_root()
+    
+    parser = argparse.ArgumentParser(description="Easy WAN Emulator - 极简 Linux 弱网模拟工具")
+    parser.add_argument("-i", "--interface", required=True, help="目标网卡名称 (例如: eth1 或 eth2)")
+    parser.add_argument("--delay", type=int, default=0, help="网络延迟 (毫秒 ms)")
+    parser.add_argument("--jitter", type=int, default=0, help="延迟抖动 (毫秒 ms)")
+    parser.add_argument("--loss", type=float, default=0.0, help="丢包率 (百分比 %)")
+    parser.add_argument("--reset", action="store_true", help="清空该网卡的所有模拟规则")
+    parser.add_argument("--status", action="store_true", help="查看该网卡当前的网络规则")
+
+    args = parser.parse_args()
+
+    if args.status:
+        show_status(args.interface)
+    elif args.reset:
+        reset_interface(args.interface)
+    else:
+        apply_netem(args.interface, args.delay, args.jitter, args.loss)
+
+if __name__ == "__main__":
+    main()
