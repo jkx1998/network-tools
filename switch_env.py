@@ -54,39 +54,47 @@ def get_interface_name(pci_addr):
 
 def generate_netplan(config, mode):
     print(f"[*] 生成 {mode} 模式的 Netplan 配置...")
-    
-    # 统一使用变量名 yaml_content
-    yaml_content = "network:\n  version: 2\n  renderer: NetworkManager\n"
+
+    ethernets = {}
+    bridges = {}
+
+    # 管理口始终保留，防止 netplan apply 重置管理接口导致 SSH 断开
+    mgmt = config.get("mgmt_interface")
+    if mgmt:
+        ethernets[mgmt] = "      dhcp4: false\n      optional: true\n"
 
     if mode == "linux":
-        yaml_content += "  ethernets:\n"
         for group in config['groups']:
             for iface in group['interfaces']:
                 name = get_interface_name(iface['pci'])
                 if name:
-                    yaml_content += f"    {name}:\n      dhcp4: false\n"
+                    ethernets[name] = "      dhcp4: false\n      optional: true\n"
 
-        yaml_content += "  bridges:\n"
         for group in config['groups']:
-            yaml_content += f"    {group['bridge']}:\n"
             real_interfaces = [get_interface_name(i['pci']) for i in group['interfaces'] if get_interface_name(i['pci'])]
             if real_interfaces:
-                yaml_content += f"      interfaces: {str(real_interfaces)}\n"
-                yaml_content += "      parameters:\n        stp: false\n        forward-delay: 0\n"
-                yaml_content += "      dhcp4: false\n"
-    
+                bridges[group['bridge']] = (
+                    f"      interfaces: {str(real_interfaces)}\n"
+                    "      parameters:\n        stp: false\n        forward-delay: 0\n"
+                    "      dhcp4: false\n"
+                    "      optional: true\n"
+                )
+
+    yaml_content = "network:\n  version: 2\n  renderer: NetworkManager\n"
+    if ethernets:
+        yaml_content += "  ethernets:\n"
+        for name, cfg in ethernets.items():
+            yaml_content += f"    {name}:\n{cfg}"
+    if bridges:
+        yaml_content += "  bridges:\n"
+        for name, cfg in bridges.items():
+            yaml_content += f"    {name}:\n{cfg}"
+
     try:
-        # 如果是 dpdk 模式且没有任何内容，或者 linux 模式下，统一写入
-        # 如果 yaml_content 内容只有头部，说明没有接口，那就不需要生成文件
-        if len(yaml_content) > 50: # 50 是 basic header 的长度
-            with open(NETPLAN_FILE, 'w') as f:
-                f.write(yaml_content)
-            os.chmod(NETPLAN_FILE, 0o600)
-            run_cmd("netplan apply")
-        else:
-            if os.path.exists(NETPLAN_FILE):
-                os.remove(NETPLAN_FILE)
-                run_cmd("netplan apply")
+        with open(NETPLAN_FILE, 'w') as f:
+            f.write(yaml_content)
+        os.chmod(NETPLAN_FILE, 0o600)
+        run_cmd("netplan apply")
         print("[+] Netplan 配置已应用")
     except Exception as e:
         print(f"[-] 写入配置失败: {e}")
