@@ -57,21 +57,109 @@ tests/test_ezwan.py::TestValidateParams::test_negative_delay PASSED
 
 ## 测试内容说明
 
-测试文件一共 3 个：
+共 34 个测试用例，分在两个文件中。
 
-| 文件 | 测试什么 | 用例数 |
-|------|----------|--------|
-| `test_ezwan.py` | 弱网模拟工具（参数验证、命令执行） | 22 个 |
-| `test_switch_env.py` | 网卡模式切换工具（配置加载、Netplan 生成） | 12 个 |
-| `conftest.py` | 共享的测试数据，不用管 | - |
+### test_ezwan.py — 22 个用例
 
-### 测试了什么？
+**参数验证（8个）**
 
-- 配置文件能不能正常加载？
-- 缺少配置时会报错吗？
-- 延迟参数能不能是负数？（当然不能）
-- 丢包率能超过 100% 吗？（也不能）
-- tc 命令能正确拼出来吗？
+| 测试 | 验证什么 |
+|------|----------|
+| `test_all_valid_defaults` | 全部为 0 的默认参数能过 |
+| `test_normal_params` | 正常的延迟+抖动+丢包能过 |
+| `test_max_loss` | 丢包率 100% 是合法的上限 |
+| `test_negative_delay` | 延迟为负数 → 拒绝 |
+| `test_negative_jitter` | 抖动为负数 → 拒绝 |
+| `test_loss_above_100` | 丢包率超过 100% → 拒绝 |
+| `test_negative_loss` | 丢包率为负数 → 拒绝 |
+| `test_multiple_invalid_params` | 多个参数全非法 → 拒绝 |
+
+**命令执行（4个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_run_cmd_success` | 成功时返回 True + 命令输出 |
+| `test_run_cmd_failure` | 失败时返回 False + 错误信息 |
+| `test_run_cmd_string_input` | 字符串参数自动拆成列表 |
+| `test_run_cmd_tc_not_found` | tc 没安装时给出友好提示 |
+
+**权限检查（2个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_root_user_passes` | root 用户（uid=0）不拦截 |
+| `test_non_root_user_exits` | 普通用户直接退出 |
+
+**规则重置（2个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_reset_calls_tc_delete` | 执行了 `tc qdisc del` 命令 |
+| `test_reset_handles_no_existing_rule` | 本来就没规则也不崩溃 |
+
+**网络模拟（7个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_delay_only` | 只设延迟 → 命令不含 loss 参数 |
+| `test_delay_with_jitter` | 延迟+抖动 → 含 25% 相关性参数 |
+| `test_loss_only` | 只设丢包 → 命令不含 delay 参数 |
+| `test_combined_delay_loss` | 三个参数组合 → 命令包含全部 |
+| `test_no_params_resets_only` | 无参数时只重置、不执行 tc |
+| `test_command_dev_order` | 参数拼写顺序正确 |
+| `test_invalid_params_rejected` | 非法参数在重置网卡之前就被拦住 |
+
+**状态查看（2个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_show_with_netem_rules` | 有规则时输出延迟数值 |
+| `test_show_direct_mode` | 无规则时输出"无限制（直通状态）" |
+
+**入口函数（4个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_status_flag_calls_show` | `--status` 参数会调用显示状态 |
+| `test_reset_flag_calls_reset` | `--reset` 参数会调用重置规则 |
+| `test_apply_mode_with_params` | 默认模式调网络模拟 |
+| `test_missing_interface_exits` | 缺少 -i 参数直接退出 |
+
+---
+
+### test_switch_env.py — 12 个用例
+
+**配置加载（4个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_load_valid_config` | 合法 JSON → 正常加载 |
+| `test_config_missing_file` | 文件不存在 → 退出并提示 |
+| `test_config_missing_required_fields` | 缺必要字段 → 退出并点名缺失项 |
+| `test_config_empty_groups` | groups 为空也是合法的 |
+
+**命令执行（3个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_run_cmd_success` | 成功返回 True |
+| `test_run_cmd_failure` | 失败返回 False |
+| `test_run_cmd_string_input` | 字符串自动拆成列表 |
+
+**网卡名获取（3个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_interface_found` | PCI 路径有网卡 → 返回 eth0 |
+| `test_interface_not_found` | PCI 路径不存在 → 返回 None |
+| `test_interface_empty_dir` | net 目录为空 → 返回 None |
+
+**Netplan 生成（2个）**
+
+| 测试 | 验证什么 |
+|------|----------|
+| `test_linux_mode_generates_bridges` | Linux 模式生成 br0/br1 网桥 |
+| `test_dpdk_mode_minimal_content` | DPDK 模式只生成基本头部 |
 
 ## 常用命令速查
 
