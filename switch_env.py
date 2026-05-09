@@ -4,58 +4,90 @@ import subprocess
 import os
 import sys
 import time
+import argparse
+import logging
+from pathlib import Path
+import shlex
 
-
-#BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = "/opt/network-tools" 
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+BASE_DIR = Path(__file__).parent.resolve()
+CONFIG_FILE = BASE_DIR / "config.json"
 NETPLAN_FILE = "/etc/netplan/99-dynamic-config.yaml"
 
-def load_config():
-    with open(CONFIG_FILE, 'r') as f:
-        return json.load(f)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-def run_cmd(cmd):
+
+def load_config():
+    if not CONFIG_FILE.exists():
+        logger.error(f"配置文件不存在: {CONFIG_FILE}")
+        sys.exit(f"错误: 配置文件不存在 {CONFIG_FILE}")
+
+    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+
+    required_fields = ['groups', 'default_driver', 'dpdk_driver']
+    missing = [f for f in required_fields if f not in config]
+    if missing:
+        logger.error(f"配置缺少必要字段: {missing}")
+        sys.exit(f"错误: 配置缺少必要字段: {missing}")
+
+    return config
+
+
+def run_cmd(cmd, check=True):
+    """执行shell命令，支持列表形式避免shell注入"""
+    if isinstance(cmd, str):
+        cmd = shlex.split(cmd)
     try:
-        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.run(cmd, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as e:
-        print(f"[-] 命令失败: {cmd}\n{e.stderr.decode().strip()}")
+        logger.error(f"命令失败: {e.stderr}")
+        return False
+    return True
 
 def bind_driver(pci, driver):
-    unbind_path = f"/sys/bus/pci/devices/{pci}/driver/unbind"
-    if os.path.exists(unbind_path):
+    """绑定网卡驱动"""
+    logger.info(f"尝试将 {pci} 绑定到 {driver}")
+
+    unbind_path = Path(f"/sys/bus/pci/devices/{pci}/driver/unbind")
+    if unbind_path.exists():
         try:
             with open(unbind_path, "w") as f:
                 f.write(pci)
-        except OSError:
-            pass
-    
-    run_cmd(f"modprobe {driver}")
-    bind_path = f"/sys/bus/pci/drivers/{driver}/bind"
-    if os.path.exists(bind_path):
+        except OSError as e:
+            logger.warning(f"解绑失败: {e}")
+
+    run_cmd(["modprobe", driver])
+
+    bind_path = Path(f"/sys/bus/pci/drivers/{driver}/bind")
+    if bind_path.exists():
         try:
             with open(bind_path, "w") as f:
                 f.write(pci)
-            print(f"[+] {pci} -> {driver} 绑定成功")
+            logger.info(f"{pci} -> {driver} 绑定成功")
         except OSError:
-            print(f"[*] {pci} -> {driver} 可能已绑定")
+            logger.info(f"{pci} -> {driver} 可能已绑定")
 
 
 def get_interface_name(pci_addr):
     """根据 PCI 地址获取当前网卡名称"""
     try:
-        # 在 /sys/bus/pci/devices/PCI_ADDR/net/ 下面就是网卡名
-        path = f"/sys/bus/pci/devices/{pci_addr}/net"
-        if os.path.exists(path):
-            return os.listdir(path)[0] # 返回第一个找到的名字
-    except Exception:
-        pass
+        path = Path(f"/sys/bus/pci/devices/{pci_addr}/net")
+        if path.exists():
+            interfaces = list(path.iterdir())
+            if interfaces:
+                return interfaces[0].name
+    except Exception as e:
+        logger.warning(f"获取网卡名失败 ({pci_addr}): {e}")
     return None
 
 def generate_netplan(config, mode):
-    print(f"[*] 生成 {mode} 模式的 Netplan 配置...")
-    
-    # 统一使用变量名 yaml_content
+    """生成并应用 Netplan 配置"""
+    logger.info(f"生成 {mode} 模式的 Netplan 配置")
+
     yaml_content = "network:\n  version: 2\n  renderer: NetworkManager\n"
 
     if mode == "linux":
@@ -69,52 +101,65 @@ def generate_netplan(config, mode):
         yaml_content += "  bridges:\n"
         for group in config['groups']:
             yaml_content += f"    {group['bridge']}:\n"
-            real_interfaces = [get_interface_name(i['pci']) for i in group['interfaces'] if get_interface_name(i['pci'])]
+            real_interfaces = []
+            for i in group['interfaces']:
+                iface_name = get_interface_name(i['pci'])
+                if iface_name:
+                    real_interfaces.append(iface_name)
+
             if real_interfaces:
                 yaml_content += f"      interfaces: {str(real_interfaces)}\n"
                 yaml_content += "      parameters:\n        stp: false\n        forward-delay: 0\n"
                 yaml_content += "      dhcp4: false\n"
-    
+
     try:
-        # 如果是 dpdk 模式且没有任何内容，或者 linux 模式下，统一写入
-        # 如果 yaml_content 内容只有头部，说明没有接口，那就不需要生成文件
-        if len(yaml_content) > 50: # 50 是 basic header 的长度
+        if len(yaml_content) > 50:
             with open(NETPLAN_FILE, 'w') as f:
                 f.write(yaml_content)
             os.chmod(NETPLAN_FILE, 0o600)
-            run_cmd("netplan apply")
+            run_cmd(["netplan", "apply"])
         else:
-            if os.path.exists(NETPLAN_FILE):
-                os.remove(NETPLAN_FILE)
-                run_cmd("netplan apply")
-        print("[+] Netplan 配置已应用")
+            if Path(NETPLAN_FILE).exists():
+                Path(NETPLAN_FILE).unlink()
+                run_cmd(["netplan", "apply"])
+        logger.info("Netplan 配置已应用")
     except Exception as e:
-        print(f"[-] 写入配置失败: {e}")
+        logger.error(f"写入配置失败: {e}")
 
 def main():
+    parser = argparse.ArgumentParser(description="Network Tools - 网卡模式切换工具")
+    parser.add_argument("mode", choices=["linux", "dpdk"], help="切换模式: linux 或 dpdk")
+    parser.add_argument("-d", "--delay", type=int, default=1, help="切换后的等待时间(秒)，默认1秒")
+    parser.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
+    args = parser.parse_args()
+
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+
     if os.geteuid() != 0:
         sys.exit("请使用 sudo 运行")
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["linux", "dpdk"])
-    args = parser.parse_args()
+
+    logger.info(f"切换到 {args.mode} 模式")
     config = load_config()
 
     if args.mode == "linux":
-        print(">>> 切换到 Linux (Ezwan) 模式")
+        logger.info(">>> 切换到 Linux (Ezwan) 模式")
         for group in config['groups']:
             for iface in group['interfaces']:
                 bind_driver(iface['pci'], config['default_driver'])
-        time.sleep(1)
+        time.sleep(args.delay)
         generate_netplan(config, "linux")
-        
+
     elif args.mode == "dpdk":
-        print(">>> 切换到 DPDK (TRex/VPP) 模式")
-        generate_netplan(config, "dpdk") # 先释放网卡
-        time.sleep(1)
+        logger.info(">>> 切换到 DPDK (TRex/VPP) 模式")
+        generate_netplan(config, "dpdk")
+        time.sleep(args.delay)
         for group in config['groups']:
             for iface in group['interfaces']:
                 bind_driver(iface['pci'], config['dpdk_driver'])
+
+    logger.info("切换完成")
+
 
 if __name__ == "__main__":
     main()

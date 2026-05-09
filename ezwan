@@ -3,70 +3,105 @@ import argparse
 import subprocess
 import sys
 import os
+import logging
+from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 def run_cmd(cmd):
     """执行 Shell 命令并返回结果"""
+    if isinstance(cmd, str):
+        cmd = cmd.split()
     try:
-        result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         return True, result.stdout
     except subprocess.CalledProcessError as e:
         return False, e.stderr
+    except FileNotFoundError:
+        return False, "tc 命令未找到，请确保已安装 iproute2"
+
 
 def check_root():
     """检查是否为 root 权限（tc 命令需要 root）"""
     if os.geteuid() != 0:
-        print("错误: 此工具需要 root 权限，请使用 sudo 运行。")
+        logger.error("此工具需要 root 权限，请使用 sudo 运行。")
         sys.exit(1)
+
 
 def reset_interface(iface):
     """清除网卡上的所有 tc 规则"""
-    print(f"[*] 正在清除 {iface} 上的规则...")
-    cmd = f"tc qdisc del dev {iface} root"
+    logger.info(f"正在清除 {iface} 上的规则...")
+    cmd = ["tc", "qdisc", "del", "dev", iface, "root"]
     success, output = run_cmd(cmd)
-    # 如果本来就没有规则，tc 会报错，这里忽略该错误
-    print(f"[+] {iface} 规则已重置。")
+    if not success and "No such file or directory" not in output:
+        logger.warning(f"清除规则时出现警告: {output}")
+    logger.info(f"{iface} 规则已重置")
+
 
 def show_status(iface):
     """显示网卡当前的 tc 规则"""
-    cmd = f"tc qdisc show dev {iface}"
+    cmd = ["tc", "qdisc", "show", "dev", iface]
     success, output = run_cmd(cmd)
-    print(f"--- {iface} 当前状态 ---")
+    logger.info(f"--- {iface} 当前状态 ---")
     if "netem" in output:
         print(output.strip())
     else:
         print("无限制 (直通状态)")
     print("-" * 30)
 
+
+def validate_params(delay, jitter, loss):
+    """验证参数范围"""
+    errors = []
+    if delay < 0:
+        errors.append("延迟不能为负数")
+    if jitter < 0:
+        errors.append("抖动不能为负数")
+    if not 0 <= loss <= 100:
+        errors.append("丢包率必须在 0-100 之间")
+
+    if errors:
+        for err in errors:
+            logger.error(err)
+        sys.exit(1)
+
+
 def apply_netem(iface, delay, jitter, loss):
     """应用网络模拟规则"""
-    # 先清理旧规则
-    reset_interface(iface)
-    
-    # 构建 netem 命令
-    tc_cmd = f"tc qdisc add dev {iface} root netem"
-    
-    if delay > 0:
-        tc_cmd += f" delay {delay}ms"
-        if jitter > 0:
-            tc_cmd += f" {jitter}ms 25%" # 25%是相关性，使抖动更真实
-            
-    if loss > 0:
-        tc_cmd += f" loss {loss}%"
+    validate_params(delay, jitter, loss)
 
-    if tc_cmd == f"tc qdisc add dev {iface} root netem":
-        print("[!] 没有指定任何延迟或丢包参数，仅重置了网络。")
+    reset_interface(iface)
+
+    tc_cmd = ["tc", "qdisc", "add", "dev", iface, "root", "netem"]
+
+    if delay > 0:
+        tc_cmd.extend(["delay", f"{delay}ms"])
+        if jitter > 0:
+            tc_cmd.extend([f"{jitter}ms", "25%"])
+
+    if loss > 0:
+        tc_cmd.extend(["loss", f"{loss}%"])
+
+    if len(tc_cmd) == 7:
+        logger.warning("没有指定任何延迟或丢包参数，仅重置了网络。")
         return
 
-    print(f"[*] 应用规则: {tc_cmd}")
+    logger.info(f"应用规则: {' '.join(tc_cmd)}")
     success, output = run_cmd(tc_cmd)
     if success:
-        print(f"[+] 成功应用规则到 {iface}!")
+        logger.info(f"成功应用规则到 {iface}!")
     else:
-        print(f"[-] 失败: {output}")
+        logger.error(f"失败: {output}")
+
 
 def main():
     check_root()
-    
+
     parser = argparse.ArgumentParser(description="Easy WAN Emulator - 极简 Linux 弱网模拟工具")
     parser.add_argument("-i", "--interface", required=True, help="目标网卡名称 (例如: eth1 或 eth2)")
     parser.add_argument("--delay", type=int, default=0, help="网络延迟 (毫秒 ms)")
@@ -74,8 +109,12 @@ def main():
     parser.add_argument("--loss", type=float, default=0.0, help="丢包率 (百分比 %)")
     parser.add_argument("--reset", action="store_true", help="清空该网卡的所有模拟规则")
     parser.add_argument("--status", action="store_true", help="查看该网卡当前的网络规则")
+    parser.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
 
     args = parser.parse_args()
+
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
 
     if args.status:
         show_status(args.interface)
@@ -83,6 +122,7 @@ def main():
         reset_interface(args.interface)
     else:
         apply_netem(args.interface, args.delay, args.jitter, args.loss)
+
 
 if __name__ == "__main__":
     main()
