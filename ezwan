@@ -55,6 +55,7 @@ def show_status(iface):
     print("-" * 30)
 
 
+# 验证参数有效性
 def validate_params(delay, jitter, loss):
     """验证参数范围"""
     errors = []
